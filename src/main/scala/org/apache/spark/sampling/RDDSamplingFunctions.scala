@@ -3,7 +3,7 @@ package org.apache.spark.sampling
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd._
 import scala.reflect.ClassTag
-import org.apache.spark.Logging
+import org.apache.spark.{SparkContext, Logging}
 import org.apache.spark.util.random.{XORShiftRandom, RandomSampler}
 import scala.collection.mutable
 import org.apache.commons.math.random.RandomDataImpl
@@ -20,24 +20,37 @@ class RDDSamplingFunctions[T: ClassTag](self: RDD[T]) extends Logging with Seria
 
   def sampleWithoutReplacement(p: Double, n: Long = self.count(), seed: Long = System.nanoTime())
   : RDD[T] = {
-    val voted = new PartitionwiseSampledRDD[T, (Double, T)](self,
-      new SimpleRandomSamplerVote[T](p, n), seed)
-    var accepted = voted.filter(_._1 < 0.0).map(_._2)
-    val numAccepted = accepted.count
-    val s = math.ceil(p * n).toLong
+    val accumulators = new SimpleRandomSamplerAccumulators[T](self.context)
+    var accepted: RDD[T] = new PartitionwiseSampledRDD(self, new SimpleRandomSamplerVote[T](p, n, accumulators, seed))
+    // TODO: Is it possible to describe the sampled RDD without trigger a job?
+    accepted.count()
+    val numItems = accumulators.numItems.value
+    println(numItems)
+    val numAccepted = accumulators.numAccepted.value
+    println(numAccepted)
+    val s = math.ceil(p * numItems).toLong
     logInfo("To sample " + s + " items, we pre-accepted " + numAccepted + ".")
     if (s > numAccepted) {
-      val waitlisted = voted.filter(_._1 >= 0).collect()
-      logInfo("To sample " + s + " items, we waitlisted " + waitlisted.length + ".")
-      val waitlistAccepted = waitlisted.sortBy(_._1).take((s - numAccepted).toInt).map(_._2)
-      accepted = accepted.union(self.context.makeRDD(waitlistAccepted))
+      val waitlisted = accumulators.waitlisted.value
+      logInfo("To sample " + s + " items, we waitlisted " + waitlisted.size + ".")
+      val waitlistAccepted = waitlisted.take((s - numAccepted).toInt).map(_._2)
+      accepted = accepted.union(self.context.makeRDD(waitlistAccepted.toSeq, 1))
     }
+    // TODO: how to de-register accumulators?
     accepted
   }
 }
 
-private class SimpleRandomSamplerVote[T](p: Double, n: Long, var seed: Long = System.nanoTime())
-    extends RandomSampler[T, (Double, T)] {
+private class SimpleRandomSamplerAccumulators[T](sc: SparkContext) extends Serializable {
+  val numItems = sc.accumulator[Long](0L)
+  val numAccepted = sc.accumulator[Long](0L)
+  val waitlisted = sc.accumulableCollection[mutable.TreeSet[(Double, T)], (Double, T)](
+    new mutable.TreeSet[(Double, T)]()(Ordering.by(_._1))
+  )
+}
+
+private class SimpleRandomSamplerVote[T](p: Double, n: Long, accumulators: SimpleRandomSamplerAccumulators[T], var seed: Long = System.nanoTime())
+    extends RandomSampler[T, T] {
 
   val t1 = 20.0 / (3.0 * n)
   val q1 = p + t1 - math.sqrt(t1 * t1 + 3.0 * t1 * p)
@@ -51,17 +64,22 @@ private class SimpleRandomSamplerVote[T](p: Double, n: Long, var seed: Long = Sy
     random.setSeed(seed)
   }
 
-  override def sample(items: Iterator[T]): Iterator[(Double, T)] = {
-    items.map((random.nextDouble, _)).filter(_._1 < q2).map { case (x, t) =>
+  override def sample(items: Iterator[T]): Iterator[T] = {
+    items.filter { t =>
+      accumulators.numItems += 1L
+      val x = random.nextDouble()
+      var accepted = false
       if (x < q1) {
-        (-1.0, t)
-      } else {
-        (x, t)
+        accumulators.numAccepted += 1L
+        accepted = true
+      } else if (x < q2) {
+        accumulators.waitlisted += (x, t)
       }
+      accepted
     }
   }
 
-  override def clone() = new SimpleRandomSamplerVote[T](p, n, seed)
+  override def clone() = new SimpleRandomSamplerVote[T](p, n, accumulators, seed)
 }
 
 private class SimpleRandomSamplerWithReplacementVote[T](s: Long, n: Long,

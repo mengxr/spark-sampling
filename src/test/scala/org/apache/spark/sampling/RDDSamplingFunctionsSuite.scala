@@ -5,7 +5,7 @@ import org.apache.spark.SparkContext
 
 import org.apache.spark.sampling.RDDSamplingFunctions._
 
-class SimpleRandomSamplerSuite extends FunSuite with BeforeAndAfterAll {
+class RDDSamplingFunctionsSuite extends FunSuite with BeforeAndAfterAll {
 
   @transient private var sc: SparkContext = _
 
