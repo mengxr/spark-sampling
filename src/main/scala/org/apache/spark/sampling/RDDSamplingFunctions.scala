@@ -10,7 +10,7 @@ import org.apache.commons.math.random.RandomDataImpl
 
 class RDDSamplingFunctions[T: ClassTag](self: RDD[T]) extends Logging with Serializable {
 
-  def sampleWithReplacement(s: Long, n: Long, seed: Long = System.nanoTime()): RDD[T] = {
+  def sampleWithReplacement(s: Long, n: Long = self.count(), seed: Long = System.nanoTime()): RDD[T] = {
     val voted = new PartitionwiseSampledRDD[T, (Long, (Double, T))](self,
       new SimpleRandomSamplerWithReplacementVote[T](s, n), seed)
     voted.reduceByKey { (v1: (Double, T), v2: (Double, T)) =>
