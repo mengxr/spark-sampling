@@ -4,6 +4,7 @@ import org.scalatest.{BeforeAndAfterAll, FunSuite}
 import org.apache.spark.SparkContext
 
 import org.apache.spark.sampling.RDDSamplingFunctions._
+import org.apache.log4j.{Level, Logger}
 
 class RDDSamplingFunctionsSuite extends FunSuite with BeforeAndAfterAll {
 
