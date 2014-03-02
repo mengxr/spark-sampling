@@ -1,13 +1,14 @@
 package org.apache.spark.sampling
 
+import java.util.Random
+
+import scala.collection.mutable.{ArrayBuffer, HashSet => MutableHashSet}
+import scala.reflect.ClassTag
+
+import org.apache.commons.math.random.RandomDataImpl
+import org.apache.spark.Logging
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd._
-import scala.reflect.ClassTag
-import org.apache.spark.Logging
-import org.apache.spark.util.random.RandomSampler
-import scala.collection.mutable.{ArrayBuffer, HashSet => MutableHashSet}
-import org.apache.commons.math.random.RandomDataImpl
-import java.util.Random
 
 class RDDSamplingFunctions[T: ClassTag](self: RDD[T]) extends Logging with Serializable {
 
@@ -61,61 +62,38 @@ class RDDSamplingFunctions[T: ClassTag](self: RDD[T]) extends Logging with Seria
   }
 
   def sampleWithReplacement(s: Long, n: Long = self.count(), seed: Long = System.nanoTime()): RDD[T] = {
-    val voted = new PartitionwiseSampledRDD[T, (Long, (Double, T))](self,
-      new SimpleRandomSamplerWithReplacementVote[T](s, n), seed)
+    val failureRate = 1e-4
+    val threshold = 1.0 - math.exp(math.log(failureRate / s) / n)
+    val voted = self.mapPartitionsWithIndex((idx: Int, iter: Iterator[T]) => {
+        val random = new RandomDataImpl()
+        random.reSeed(seed + idx)
+        iter.map { t =>
+          (random.nextBinomial(s.toInt, threshold), t)
+        }.filter(_._1 > 0).flatMap { case (i, t) =>
+          sampleWithoutReplacement(s, i, random).map { pos =>
+            (pos, (random.nextUniform(0.0, 1.0), t))
+          }
+        }
+      }, preservesPartitioning = true)
     voted.reduceByKey { (v1: (Double, T), v2: (Double, T)) =>
       if (v1._1 < v2._1) v1 else v2
     }.map(_._2._2)
   }
-}
 
-private class SimpleRandomSamplerWithReplacementVote[T](s: Long, n: Long,
-    var seed: Long = System.nanoTime()) extends RandomSampler[T, (Long, (Double, T))] {
-
-  val random = new RandomDataImpl()
-  random.reSeed(seed)
-
-  val failureRate = 1e-4
-  val threshold = 1.0 - math.exp(math.log(failureRate / s) / n);
-
-  def setSeed(seed: Long) {
-    this.seed = seed
-    random.reSeed(seed)
-  }
-
-  def sample(items: Iterator[T]): Iterator[(Long, (Double, T))] = {
-    items.map { t =>
-      (random.nextBinomial(s.toInt, threshold), t)
-    }.filter(_._1 > 0).flatMap { case (i, t) =>
-      sampleWithoutReplacement(s, i).map { pos =>
-        (pos, (random.nextUniform(0.0, 1.0), t))
-      }
-    }
-  }
-
-  override def clone() = new SimpleRandomSamplerWithReplacementVote[T](s, n, seed)
-
-  private def sampleWithoutReplacement(n: Long, k: Int): Iterable[Long] =
+  // Sample k numbers without replacement from [0, n).
+  private def sampleWithoutReplacement(n: Long, k: Int, random: RandomDataImpl): Iterable[Long] =
   {
     if (k == 0) {
       return Iterable.empty[Long]
-    }
-
-    if (k < n / 3) {
-
+    } else if (k < n / 3) {
       val sample = new MutableHashSet[Long]()
-
       // The expected number of iterations is less than 1.5*k
       while (sample.size < k) {
         sample += random.nextLong(0L, n - 1L)
       }
-
       return sample
-
     } else {
-
       val sample = new Array[Long](k)
-
       var i: Int = 0
       var j: Long = 0L
       while (j < n && i < k) {
@@ -125,7 +103,6 @@ private class SimpleRandomSamplerWithReplacementVote[T](s: Long, n: Long,
         }
         j += 1L
       }
-
       return sample
     }
   }
