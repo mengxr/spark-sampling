@@ -12,6 +12,7 @@ class RDDSamplingFunctionsSuite extends FunSuite with BeforeAndAfterAll {
 
   override def beforeAll() {
     sc = new SparkContext("local", "test")
+    Logger.getRootLogger.setLevel(Level.WARN)
   }
 
   override def afterAll() {
@@ -35,6 +36,16 @@ class RDDSamplingFunctionsSuite extends FunSuite with BeforeAndAfterAll {
     for (p <- Seq(0.01, 0.05, 0.1, 0.5, 1.0); seed <- (0L until 5L)) {
       val s = math.ceil(p * n).toLong
       val sampled = data.sampleWithReplacement(s, n, seed)
+      assert(sampled.count() === s)
+    }
+  }
+
+  test("ScaSRSWR (new)") {
+    val n = 10000L
+    val data = sc.parallelize(0L until n, 5)
+    for (p <- Seq(0.01, 0.05, 0.1, 0.5, 1.0); seed <- (0L until 5L)) {
+      val s = math.ceil(p * n).toLong
+      val sampled = data.sampleWithReplacementNew(s, n, seed)
       assert(sampled.count() === s)
     }
   }

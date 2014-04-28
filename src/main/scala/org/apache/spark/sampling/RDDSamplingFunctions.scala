@@ -5,7 +5,7 @@ import java.util.Random
 import scala.collection.mutable.{ArrayBuffer, HashSet => MutableHashSet}
 import scala.reflect.ClassTag
 
-import org.apache.commons.math.random.RandomDataImpl
+import org.apache.commons.math3.random.RandomDataImpl
 import org.apache.spark.Logging
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd._
@@ -78,6 +78,53 @@ class RDDSamplingFunctions[T: ClassTag](self: RDD[T]) extends Logging with Seria
     voted.reduceByKey { (v1: (Double, T), v2: (Double, T)) =>
       if (v1._1 < v2._1) v1 else v2
     }.map(_._2._2)
+  }
+
+  def sampleWithReplacementNew(s: Long, n: Long = self.count(), seed: Long = System.nanoTime()): RDD[T] = {
+    val lmbd1 = PoissonBounds.getLambda1(s)
+    println("lmbd1 = " + lmbd1)
+    val minCount = PoissonBounds.getMinCount(lmbd1)
+    println("minCount = " + minCount)
+    val lmbd2 = if (lmbd1 == 0) PoissonBounds.getLambda2(s) else PoissonBounds.getLambda2(s-minCount)
+    println("lmbd2 = " + lmbd2)
+    val p1 = lmbd1/n
+    val p2 = lmbd2/n
+    val sc = self.context
+    val accNumAccepted = sc.accumulator[Long](0L)
+    val accWaitlisted = sc.accumulableCollection[ArrayBuffer[Double], Double](new ArrayBuffer[Double]())
+    self.foreachWith((idx: Int) => {
+      val random = new RandomDataImpl()
+      random.reSeed(seed + idx)
+      random
+    }){ (item: T, random: RandomDataImpl) =>
+      val x1 = if (p1 == 0) 0L else random.nextPoisson(p1)
+      if (x1 > 0) {
+        accNumAccepted += x1
+      }
+      val x2 = random.nextPoisson(p2).toInt
+      if (x2 > 0) {
+        accWaitlisted ++= ArrayBuffer.fill(x2)(random.nextUniform(0.0, 1.0))
+      }
+    }
+    val numAccepted = accNumAccepted.value
+    val waitlisted = accWaitlisted.value.sorted
+    println("numAccepted = " + numAccepted)
+    println("numWaitlisted = " + waitlisted.size)
+    val threshold = waitlisted((s-numAccepted).toInt)
+    self.mapPartitionsWithIndex((idx: Int, iter: Iterator[T]) => {
+      val random = new RandomDataImpl()
+      random.reSeed(seed + idx)
+      iter.flatMap { t =>
+        val x1 = if (p1 == 0) 0L else random.nextPoisson(p1)
+        val x2 = random.nextPoisson(p2).toInt
+        val x = x1 + (0 until x2).filter(i => random.nextUniform(0.0, 1.0) < threshold).size
+        if (x > 0) {
+          Iterator.fill(x.toInt)(t)
+        } else {
+          Iterator.empty
+        }
+      }
+    }, preservesPartitioning = true)
   }
 
   // Sample k numbers without replacement from [0, n).
